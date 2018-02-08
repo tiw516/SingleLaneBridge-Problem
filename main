@@ -1,0 +1,218 @@
+import java.util.Random;
+import java.util.Scanner;
+
+import akka.actor.ActorSystem;
+import akka.actor.Props;
+import akka.actor.UntypedActor;
+
+public class SingleLaneBridge {
+	// ======================================================================
+		// Constants defined here
+		// ======================================================================
+
+		// Time it takes a car to cross the bridge in milliseconds
+		private static final int TIME_TO_CROSS = 2000;
+
+		// Maximum time in seconds a car will wait before asking the bridge again
+		// for permission to cross
+		private static final int MAX_DELAY_DURATION = 10;
+
+		// ======================================================================
+		// Messages to be passed between actors defined here
+		// ======================================================================
+
+		// Represents the 4 possible messages the bridge can receive
+		private enum Message {
+			ENTER_NORTH, ENTER_SOUTH, EXIT_NORTH, EXIT_SOUTH
+		};
+
+		// Represents the 2 possible messages the bridge can send to cars
+		private enum Cross {
+			YES, NO
+		};
+
+		// ======================================================================
+		// Actors defined here
+		// ======================================================================
+		public static class CarActor extends UntypedActor {
+
+			// A car can either be headed north or south - this is a car's state
+			private enum State {
+				NORTH, SOUTH
+			};
+
+			// Current state of the car
+			private State direction;
+
+			// Seeds a random number generator
+			private Random rand = new Random();
+
+			// Initializes the car actor and queues the car actor to cross the
+			// bridge
+			public void preStart() {
+
+				// Randomly choose north or south starting direction
+				double r = Math.random();
+				if (r > 0.5) {
+					direction = State.NORTH;
+					System.out.println("Car \"" + getSelf().path().name() + "\" initialized in North direction");
+				} else {
+					direction = State.SOUTH;
+					System.out.println("Car \"" + getSelf().path().name() + "\" initialized in South direction");
+				}
+
+				// Pause for a random amount of time up to MAX_DELAY_DURATION
+				// seconds
+				try {
+					Thread.sleep((rand.nextInt(MAX_DELAY_DURATION) + 1) * 1000);
+				} catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+				}
+
+				// Ask the bridge if we can cross - replies to this message will be
+				// dealt with in onReceive()
+				if (direction == State.NORTH) {
+					getContext().actorSelection("/user/Bridge").tell(Message.ENTER_NORTH, getSelf());
+				} else {
+					getContext().actorSelection("/user/Bridge").tell(Message.ENTER_SOUTH, getSelf());
+				}
+			}
+
+			// Handles messages received from the bridge
+			public void onReceive(Object msg) {
+				if (msg instanceof Cross) {
+					Cross m = (Cross) msg;
+					if (m == Cross.YES) {
+						// If we have permission to cross, wait the time it takes to
+						// cross the bridge, then switch to the opposite direction
+						// and cross the bridge again after a random delay
+						try {
+							Thread.sleep(TIME_TO_CROSS);
+						} catch (InterruptedException ex) {
+							Thread.currentThread().interrupt();
+						}
+						if (direction == State.NORTH) {
+							getSender().tell(Message.EXIT_NORTH, getSelf());
+							direction = State.SOUTH;
+							try {
+								Thread.sleep((rand.nextInt(MAX_DELAY_DURATION) + 1) * 1000);
+							} catch (InterruptedException ex) {
+								Thread.currentThread().interrupt();
+							}
+							getSender().tell(Message.ENTER_SOUTH, getSelf());
+						} else {
+							getSender().tell(Message.EXIT_SOUTH, getSelf());
+							direction = State.NORTH;
+							try {
+								Thread.sleep((rand.nextInt(MAX_DELAY_DURATION) + 1) * 1000);
+							} catch (InterruptedException ex) {
+								Thread.currentThread().interrupt();
+							}
+							getSender().tell(Message.ENTER_NORTH, getSelf());
+						}
+					} else if (m == Cross.NO) {
+						// If we do not have permission to cross, wait a random
+						// delay then ask for permission again
+						try {
+							Thread.sleep((rand.nextInt(MAX_DELAY_DURATION) + 1) * 1000);
+						} catch (InterruptedException ex) {
+							Thread.currentThread().interrupt();
+						}
+						if (direction == State.NORTH) {
+							getSender().tell(Message.ENTER_NORTH, getSelf());
+						} else {
+							getSender().tell(Message.ENTER_SOUTH, getSelf());
+						}
+					} else {
+						unhandled(m);
+					}
+				} else {
+					unhandled(msg);
+				}
+
+			}
+		}
+
+		public static class BridgeActor extends UntypedActor {
+
+			// Number of northbound cars currently on the bridge
+			private int northCars = 0;
+
+			// Number of southbound cars currently on the bridge
+			private int southCars = 0;
+
+			// Handles messages received from cars
+			public void onReceive(Object msg) {
+				if (msg instanceof Message) {
+					Message m = (Message) msg;
+					switch (m) {
+					case ENTER_NORTH:
+						// If there are no south cars on the bridge, north cars can
+						// proceed
+						if (southCars == 0) {
+							if (northCars == 0) {
+								System.out.println("==Bridge currently allowing NORTH cars==");
+							}
+							getSender().tell(Cross.YES, getSelf());
+							northCars++;
+							System.out.println("\"" + getSender().path().name() + "\" [NORTH] has just entered bridge");
+						} else {
+							getSender().tell(Cross.NO, getSelf());
+						}
+						break;
+					case ENTER_SOUTH:
+						// If there are no north cars on the bridge, south cars can
+						// proceed
+						if (northCars == 0) {
+							if (southCars == 0) {
+								System.out.println("==Bridge currently allowing SOUTH cars==");
+							}
+							getSender().tell(Cross.YES, getSelf());
+							southCars++;
+							System.out.println("\"" + getSender().path().name() + "\" [SOUTH] has just entered bridge");
+						} else {
+							getSender().tell(Cross.NO, getSelf());
+						}
+						break;
+					case EXIT_NORTH:
+						northCars--;
+						System.out.println("\"" + getSender().path().name() + "\" [NORTH] has just exited bridge");
+						break;
+					case EXIT_SOUTH:
+						southCars--;
+						System.out.println("\"" + getSender().path().name() + "\" [SOUTH] has just exited bridge");
+						break;
+					default:
+						// If an unexpected message is received, send a no message
+						// back
+						getSender().tell(Cross.NO, getSelf());
+						break;
+					}
+				} else {
+					unhandled(msg);
+				}
+			}
+		}
+
+		public static void main(String[] args) {
+			ActorSystem system = ActorSystem.create("SingleLaneBridgeProblem");
+			system.actorOf(Props.create(BridgeActor.class), "Bridge");
+
+			// Get a number from the console and generate that many cars
+			int numCars = 0;
+			Scanner in = new Scanner(System.in);
+			while (numCars <= 0) {
+				System.out.print(
+						"Enter amount (int > 0) of cars to be generated (will be assigned random initial direction): ");
+				numCars = in.nextInt();
+			}
+			in.close();
+
+			for (int i = 0; i < numCars; i++) {
+				system.actorOf(Props.create(CarActor.class), "Car-" + i);
+			}
+
+		}
+
+
+}
